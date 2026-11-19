@@ -312,7 +312,7 @@ Subdomains match too.
 
 ## Debug mode switch
 
-Users (testers) can hide or show the floating button at runtime. The choice is saved across launches:
+Users (testers) can hide or show the floating button at runtime. Long pressing the button shows a cross that stops SwiftTraceKit (button and tracking) until the next launch. The choice is not saved, so the button is back on the next launch:
 
 ```swift
 struct SettingsView: View {
@@ -383,7 +383,7 @@ Other API:
 | `SwiftTrace.start(_:)` / `stop()` | Start or stop everything |
 | `SwiftTrace.isRunning` | Whether the library is active in this build |
 | `SwiftTrace.showDashboard()` | Open the dashboard from code |
-| `SwiftTrace.isFloatingButtonVisible` | Runtime "debug mode" switch, persisted |
+| `SwiftTrace.isFloatingButtonVisible` | Runtime "debug mode" switch, for the current launch |
 | `SwiftTrace.setScreen(_:)` | Set the screen name manually |
 | `SwiftTrace.currentScreen` / `currentScreenSnapshot` | Read the current screen (main actor or any thread) |
 | `SwiftTrace.issues` | All issues raised so far |
@@ -474,7 +474,7 @@ Several `URLProtocol`-based tools can coexist, but each one replays requests, so
 You're calling `SwiftTrace.record(...)` while automatic capture is also on. Set `capturesURLSessionAutomatically = false`.
 
 **The floating button doesn't appear.**
-Check that `SwiftTrace.isRunning` is `true`. With `.debugOnly` the app must be built in the Debug configuration. Also check that the button wasn't hidden through `isFloatingButtonVisible`, which is persisted.
+Check that `SwiftTrace.isRunning` is `true`. With `.debugOnly` the app must be built in the Debug configuration. Also check that it wasn't stopped with the long press cross, or hidden through `isFloatingButtonVisible`, during this launch.
 
 **Can testers use it in TestFlight builds?**
 Yes. Set `availability = .always` in a build configuration used only for internal testing, and never in the App Store build.

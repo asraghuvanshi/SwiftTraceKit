@@ -15,20 +15,19 @@ import UIKit
 @MainActor
 final class OverlayController {
 
-    private static let visibilityKey = "SwiftTraceKit.floatingButtonVisible"
-
     private var bubbleWindow: TraceBubbleWindow?
     private weak var dashboard: UIViewController?
     private var sceneObserver: NSObjectProtocol?
 
-    /// Persisted user choice; falls back to the configuration's default.
+    /// Runtime override, kept in memory only so the button comes back on the
+    /// next launch.
+    private var visibilityOverride: Bool?
+
+    /// Current choice for this session; falls back to the configuration's default.
     var isBubbleVisible: Bool {
-        get {
-            UserDefaults.standard.object(forKey: Self.visibilityKey) as? Bool
-                ?? TraceEngine.shared.configuration.showsFloatingButton
-        }
+        get { visibilityOverride ?? TraceEngine.shared.configuration.showsFloatingButton }
         set {
-            UserDefaults.standard.set(newValue, forKey: Self.visibilityKey)
+            visibilityOverride = newValue
             refresh()
         }
     }
@@ -68,9 +67,13 @@ final class OverlayController {
             return
         }
         if bubbleWindow == nil, let scene = UIKitHierarchy.activeScene() {
-            bubbleWindow = TraceBubbleWindow(windowScene: scene) { [weak self] in
-                self?.presentDashboard()
-            }
+            bubbleWindow = TraceBubbleWindow(
+                windowScene: scene,
+                onTap: { [weak self] in self?.presentDashboard() },
+                // Stopping tears down this very window, so wait until the
+                // gesture handler that triggered it has returned.
+                onClose: { Task { @MainActor in TraceEngine.shared.stop() } }
+            )
         }
         bubbleWindow?.isHidden = dashboard != nil
     }
@@ -111,23 +114,35 @@ final class TraceDashboardController: UIHostingController<TraceDashboardView> {}
 
 // MARK: - Bubble window
 
+/// Whether the bubble is showing its close (cross) control after a long press.
+@MainActor
+final class TraceBubbleState: ObservableObject {
+    @Published var showsClose = false
+}
+
 /// A tiny window that is the button itself.
 final class TraceBubbleWindow: UIWindow {
 
     private static let size: CGFloat = 58
     private static let margin: CGFloat = 10
+    /// The cross turns back into the normal button if left untouched.
+    private static let closeTimeout: Duration = .seconds(4)
 
     private let onTap: () -> Void
+    private let onClose: () -> Void
+    private let state = TraceBubbleState()
     private var dragOffset: CGPoint = .zero
+    private var closeTimeoutTask: Task<Void, Never>?
 
-    init(windowScene: UIWindowScene, onTap: @escaping () -> Void) {
+    init(windowScene: UIWindowScene, onTap: @escaping () -> Void, onClose: @escaping () -> Void) {
         self.onTap = onTap
+        self.onClose = onClose
         super.init(windowScene: windowScene)
 
         windowLevel = .alert + 1
         backgroundColor = .clear
 
-        let host = UIHostingController(rootView: TraceBubbleView())
+        let host = UIHostingController(rootView: TraceBubbleView(state: state))
         host.view.backgroundColor = .clear
         rootViewController = host
 
@@ -139,8 +154,9 @@ final class TraceBubbleWindow: UIWindow {
             height: Self.size
         )
 
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap)))
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
+        addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:))))
         isHidden = false
     }
 
@@ -148,9 +164,48 @@ final class TraceBubbleWindow: UIWindow {
         fatalError("init(coder:) is not supported")
     }
 
-    @objc private func handleTap() {
+    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        // While the button shows the cross, the whole button is the close
+        // target, so there is no small corner to miss.
+        if state.showsClose {
+            setShowsClose(false)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            onClose()
+            return
+        }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         onTap()
+    }
+
+    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+            setShowsClose(true)
+        case .ended, .cancelled:
+            // Start the timeout only once the finger is lifted, so the user
+            // gets the full time to tap the cross.
+            if state.showsClose { startCloseTimeout() }
+        default:
+            break
+        }
+    }
+
+    private func setShowsClose(_ shows: Bool) {
+        closeTimeoutTask?.cancel()
+        closeTimeoutTask = nil
+        withAnimation(.spring(duration: 0.25)) {
+            state.showsClose = shows
+        }
+    }
+
+    private func startCloseTimeout() {
+        closeTimeoutTask?.cancel()
+        closeTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.closeTimeout)
+            guard !Task.isCancelled else { return }
+            self?.setShowsClose(false)
+        }
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -193,6 +248,7 @@ final class TraceBubbleWindow: UIWindow {
 // MARK: - Bubble view
 
 private struct TraceBubbleView: View {
+    @ObservedObject var state: TraceBubbleState
     @ObservedObject private var network = TraceEngine.shared.network
     @ObservedObject private var issues = TraceEngine.shared.issues
 
@@ -210,18 +266,19 @@ private struct TraceBubbleView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Circle()
-                .fill(Color(white: 0.12))
+                .fill(state.showsClose ? Color.red : Color(white: 0.12))
                 .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
                 .overlay(
-                    Image(systemName: "waveform.path.ecg")
+                    Image(systemName: state.showsClose ? "xmark" : "waveform.path.ecg")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
+                        .contentTransition(.symbolEffect(.replace))
                 )
                 .frame(width: 48, height: 48)
                 .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
                 .padding(5)
 
-            if let badge {
+            if let badge, !state.showsClose {
                 Text(badge.text)
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
@@ -232,6 +289,6 @@ private struct TraceBubbleView: View {
             }
         }
         .frame(width: 58, height: 58)
-        .accessibilityLabel("SwiftTraceKit dashboard")
+        .accessibilityLabel(state.showsClose ? "Stop SwiftTraceKit" : "SwiftTraceKit dashboard")
     }
 }

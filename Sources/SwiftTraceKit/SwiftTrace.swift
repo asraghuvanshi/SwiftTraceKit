@@ -54,8 +54,9 @@ public enum SwiftTrace {
 
     /// Shows or hides the floating button at runtime.
     ///
-    /// The choice is persisted in `UserDefaults`, which makes it a good fit for
-    /// a "Debug mode" switch in your settings screen.
+    /// The choice lasts for the current launch only, so the button is back on
+    /// the next launch. Long pressing the button shows a cross that stops
+    /// SwiftTraceKit for the current launch (see `stop()`).
     public static var isFloatingButtonVisible: Bool {
         get { TraceEngine.shared.overlay.isBubbleVisible }
         set { TraceEngine.shared.overlay.isBubbleVisible = newValue }
